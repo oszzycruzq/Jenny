@@ -1,92 +1,84 @@
+# Import Libraries
 import cv2
 import time
 import mediapipe as mp
+import numpy as np
 
-# Grabbing the Holistic Model from Mediapipe and
-# Initializing the Model
-mp_holistic = mp.solutions.holistic
-holistic_model = mp_holistic.Holistic(
-	min_detection_confidence=0.5,
-	min_tracking_confidence=0.5
-)
-
-# Initializing the drawing utils for drawing the facial landmarks on image
+# Initialize Pose and Hands models from Mediapipe
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose()
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands()
 mp_drawing = mp.solutions.drawing_utils
 
-# (0) in VideoCapture is used to connect to your computer's default camera
+# Load object detection model
+net = cv2.dnn.readNetFromCaffe('deploy.prototxt', 'res10_300x300_ssd_iter_140000.caffemodel')
+
+# Initialize video capture
 capture = cv2.VideoCapture(0)
 
-# Initializing current time and precious time for calculating the FPS
+# Initializing current time and previous time for calculating the FPS
 previousTime = 0
 currentTime = 0
 
 while capture.isOpened():
-	# capture frame by frame
-	ret, frame = capture.read()
+    ret, frame = capture.read()
 
-	# resizing the frame for better view
-	frame = cv2.resize(frame, (800, 600))
+    frame = cv2.resize(frame, (800, 600))
+    h, w = frame.shape[:2]
 
-	# Converting the from BGR to RGB
-	image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Object Detection
+    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
+    net.setInput(blob)
+    detections = net.forward()
 
-	# Making predictions using holistic model
-	# To improve performance, optionally mark the image as not writeable to
-	# pass by reference.
-	image.flags.writeable = False
-	results = holistic_model.process(image)
-	image.flags.writeable = True
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        if confidence > 0.5:
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
 
-	# Converting back the RGB image to BGR
-	image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            # Extract region of interest (ROI) for each person
+            roi = frame[startY:endY, startX:endX]
+            roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
 
-	# Drawing the Facial Landmarks
-	mp_drawing.draw_landmarks(
-	image,
-	results.face_landmarks,
-	mp_holistic.FACEMESH_CONTOURS,
-	mp_drawing.DrawingSpec(
-		color=(255,0,255),
-		thickness=1,
-		circle_radius=1
-	),
-	mp_drawing.DrawingSpec(
-		color=(0,255,255),
-		thickness=1,
-		circle_radius=1
-	)
-	)
+            # Pose detection
+            roi_rgb.flags.writeable = False
+            pose_results = pose.process(roi_rgb)
+            roi_rgb.flags.writeable = True
 
-	# Drawing Right hand Land Marks
-	mp_drawing.draw_landmarks(
-	image, 
-	results.right_hand_landmarks, 
-	mp_holistic.HAND_CONNECTIONS
-	)
+            # Hand detection
+            hands_results = hands.process(roi_rgb)
 
-	# Drawing Left hand Land Marks
-	mp_drawing.draw_landmarks(
-	image, 
-	results.left_hand_landmarks, 
-	mp_holistic.HAND_CONNECTIONS
-	)
-	
-	# Calculating the FPS
-	currentTime = time.time()
-	fps = 1 / (currentTime-previousTime)
-	previousTime = currentTime
-	
-	# Displaying FPS on the image
-	cv2.putText(image, str(int(fps))+" FPS", (10, 70), cv2.FONT_HERSHEY_COMPLEX, 1, (0,255,0), 2)
+            # Draw Pose landmarks
+            if pose_results.pose_landmarks:
+                mp_drawing.draw_landmarks(
+                    roi, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
-	# Display the resulting image
-	cv2.imshow("Facial and Hand Landmarks", image)
+            # Draw Hand landmarks
+            if hands_results.multi_hand_landmarks:
+                for hand_landmarks in hands_results.multi_hand_landmarks:
+                    mp_drawing.draw_landmarks(
+                        roi, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-	# Enter key 'q' to break the loop
-	if cv2.waitKey(5) & 0xFF == ord('q'):
-		break
+            frame[startY:endY, startX:endX] = roi
 
-# When all the process is done
-# Release the capture and destroy all windows
+            # Draw bounding box for each detected person
+            cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+
+    # Calculating the FPS
+    currentTime = time.time()
+    fps = 1 / (currentTime - previousTime)
+    previousTime = currentTime
+
+    # Displaying FPS on the image
+    cv2.putText(frame, str(int(fps)) + " FPS", (10, 70), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 2)
+
+    # Display the resulting frame
+    cv2.imshow("Multi-Person Detection with Landmarks", frame)
+
+    if cv2.waitKey(5) & 0xFF == ord('q'):
+        break
+
 capture.release()
 cv2.destroyAllWindows()
