@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+
+# Model files (large binaries - download separately)
+*.caffemodel
+*.tflite
+*.task
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment / secrets
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
