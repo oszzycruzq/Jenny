@@ -27,8 +27,10 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 import threading
 import queue
 import time
+import base64
 
 import cv2
+from PIL import Image as PILImage
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -84,11 +86,13 @@ class Jenny:
         # Queues for thread communication
         self._speech_q   = queue.Queue()   # transcribed text → LLM worker
         self._response_q = queue.Queue()   # (user_text, jenny_text) → UI
+        self._image_q    = queue.Queue()   # image file paths → image worker
 
         # Build UI (must run mainloop on main thread later)
         self._ui = JennyUI(
             on_mode_change=self._on_mode_change,
             on_quit=self._on_quit,
+            on_image_drop=self._on_image_drop,
         )
 
     # ------------------------------------------------------------------ #
@@ -168,6 +172,79 @@ class Jenny:
             self.speech.speak(response)
             self._response_q.put((user_text, response))
 
+    def _on_image_drop(self, path: str):
+        print(f"[Jenny] Image dropped: {path}")
+        self._image_q.put(path)
+
+    def _image_worker(self):
+        while self._running:
+            try:
+                path = self._image_q.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            self._analyze_image(path)
+
+    def _analyze_image(self, path: str):
+        """Run YOLOv8 on the image, then ask Claude to describe it."""
+        frame = cv2.imread(path)
+        if frame is None:
+            self.speech.speak("Sorry, I couldn't open that image.")
+            return
+
+        # YOLOv8 detection + annotation
+        annotated, labels = self.vision.process_frame(frame.copy())
+
+        # Show annotated image in UI tile
+        import numpy as np
+        rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+        pil_img = PILImage.fromarray(rgb)
+        self._ui.set_drop_image(pil_img)
+        self._ui.set_analyzing(True)
+
+        # Encode original image as JPEG base64 for Claude vision
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        b64 = base64.standard_b64encode(buf.tobytes()).decode("utf-8")
+
+        det_hint = ""
+        if labels:
+            det_hint = f" I can also tell you YOLOv8 detected: {', '.join(labels[:5])}."
+
+        if self._llm is None:
+            reply = f"I see: {', '.join(labels) if labels else 'nothing recognized'}."
+        else:
+            try:
+                result = self._llm.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=200,
+                    system=SYSTEM_PROMPT,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": f"Describe what you see in this image in 2-3 sentences.{det_hint}",
+                            },
+                        ],
+                    }],
+                )
+                reply = result.content[0].text.strip()
+            except Exception as exc:
+                reply = f"I had trouble analyzing that image. ({exc})"
+
+        self._ui.set_analyzing(False)
+        self._ui.add_turn("you",   "📷 [image]")
+        self._ui.add_turn("jenny", reply)
+        print(f"[Jenny] Image analysis: {reply}")
+        self.speech.speak(reply)
+
     def _get_response(self, user_text: str) -> str:
         """Call Claude with conversation history. Falls back to echo if no API."""
         if self._llm is None:
@@ -209,6 +286,7 @@ class Jenny:
             threading.Thread(target=self._camera_worker, daemon=True),
             threading.Thread(target=self._speech_worker, daemon=True),
             threading.Thread(target=self._llm_worker,    daemon=True),
+            threading.Thread(target=self._image_worker,  daemon=True),
         ]
         for t in threads:
             t.start()

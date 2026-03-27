@@ -7,10 +7,17 @@ Jenny UI — Video-call-style dark interface.
   3. Control Bar — floating bottom row of circular icon buttons
 """
 import tkinter as tk
+from tkinter import filedialog
 import queue
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageTk
 import cv2
+
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    _DND_OK = True
+except ImportError:
+    _DND_OK = False
 
 # ── Palette (RGB tuples) ───────────────────────────────────────────── #
 _BG    = (8,   8,  10)
@@ -137,6 +144,14 @@ def _draw_icon(draw, icon, cx, cy, s):
         for dx in [int(-s*.6), 0, int(s*.6)]:
             draw.ellipse([cx+dx-r, cy-r, cx+dx+r, cy+r], fill=c)
 
+    elif icon == "photo":
+        bw, bh = int(s*.8), int(s*.6)
+        draw.rounded_rectangle([cx-bw, cy-bh, cx+bw, cy+bh], radius=3, outline=c, width=lw)
+        pr = int(s*.28)
+        draw.ellipse([cx-pr, cy-pr, cx+pr, cy+pr], outline=c, width=lw)
+        bump = int(s*.2)
+        draw.rectangle([cx-bump, cy-bh-lw, cx+bump, cy-bh+lw], fill=c)
+
 
 # ── Circular button ───────────────────────────────────────────────── #
 
@@ -203,9 +218,10 @@ class _Btn:
 # ── Main UI ───────────────────────────────────────────────────────── #
 
 class JennyUI:
-    def __init__(self, on_mode_change=None, on_quit=None):
+    def __init__(self, on_mode_change=None, on_quit=None, on_image_drop=None):
         self.on_mode_change = on_mode_change
         self.on_quit        = on_quit
+        self.on_image_drop  = on_image_drop
 
         self._frame_q   = queue.Queue(maxsize=2)
         self._mode      = "gesture"
@@ -218,6 +234,8 @@ class JennyUI:
         self._muted     = False
         self._cam_on    = True
         self._cam_img   = None
+        self._drop_image = None   # PIL Image of analyzed result
+        self._analyzing  = False  # show "Analyzing..." overlay
 
         # PIL fonts
         self._f_name   = _load_font("segoeuib.ttf", 20)
@@ -235,7 +253,7 @@ class JennyUI:
     # ── Build ─────────────────────────────────────────────────────── #
 
     def _build(self):
-        self.root = tk.Tk()
+        self.root = TkinterDnD.Tk() if _DND_OK else tk.Tk()
         self.root.title("Jenny AI")
         self.root.configure(bg=_hex(_BG))
         self.root.geometry("1280x720")
@@ -257,6 +275,10 @@ class JennyUI:
         self._cv = tk.Canvas(self.root, bg=_hex(_BG), highlightthickness=0)
         self._cv.pack(fill="both", expand=True)
 
+        if _DND_OK:
+            self._cv.drop_target_register(DND_FILES)
+            self._cv.dnd_bind("<<Drop>>", self._on_file_drop)
+
         # Layer 3: control bar
         self._build_bar()
         self._tick()
@@ -269,21 +291,22 @@ class JennyUI:
         center = tk.Frame(bar, bg=_hex(_DARK))
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        self._b_mic  = _Btn(center, "mic",     on_click=self._toggle_mic)
-        self._b_cam  = _Btn(center, "cam",     on_click=self._toggle_cam)
-        self._b_ges  = _Btn(center, "gesture", on_click=lambda: self._set_mode("gesture"))
-        self._b_vis  = _Btn(center, "vision",  on_click=lambda: self._set_mode("vision"))
-        self._b_more = _Btn(center, "more")
-        self._b_end  = _Btn(center, "end",
-                             bg_n=_END_N, bg_h=_END_H,
-                             on_click=self._quit)
+        self._b_mic   = _Btn(center, "mic",     on_click=self._toggle_mic)
+        self._b_cam   = _Btn(center, "cam",     on_click=self._toggle_cam)
+        self._b_ges   = _Btn(center, "gesture", on_click=lambda: self._set_mode("gesture"))
+        self._b_vis   = _Btn(center, "vision",  on_click=lambda: self._set_mode("vision"))
+        self._b_photo = _Btn(center, "photo",   on_click=self._open_file_dialog)
+        self._b_more  = _Btn(center, "more")
+        self._b_end   = _Btn(center, "end",
+                              bg_n=_END_N, bg_h=_END_H,
+                              on_click=self._quit)
 
         gap1 = tk.Frame(center, bg=_hex(_DARK), width=22)
         gap2 = tk.Frame(center, bg=_hex(_DARK), width=22)
         gap3 = tk.Frame(center, bg=_hex(_DARK), width=34)
 
         for w in [self._b_mic, self._b_cam, gap1,
-                  self._b_ges, self._b_vis, gap2,
+                  self._b_ges, self._b_vis, self._b_photo, gap2,
                   self._b_more, gap3,
                   self._b_end]:
             if isinstance(w, _Btn):
@@ -336,12 +359,18 @@ class JennyUI:
         tile_base = _gradient_v(tw, th, _T_TOP, _T_BOT)
         scene.paste(tile_base, (tx0, ty0), mask)
 
-        # Camera feed
-        cam_active = self._cam_img is not None and self._cam_on
-        if cam_active:
-            cam = self._cam_img.resize((tw, th), Image.LANCZOS)
-            cam = _vignette(cam, 0.48)
-            scene.paste(cam, (tx0, ty0), mask)
+        # Analyzed drop image (shown instead of camera when set)
+        if self._drop_image is not None:
+            drop = self._drop_image.resize((tw, th), Image.LANCZOS)
+            scene.paste(drop, (tx0, ty0), mask)
+            cam_active = True
+        else:
+            # Camera feed
+            cam_active = self._cam_img is not None and self._cam_on
+            if cam_active:
+                cam = self._cam_img.resize((tw, th), Image.LANCZOS)
+                cam = _vignette(cam, 0.48)
+                scene.paste(cam, (tx0, ty0), mask)
 
         # Avatar overlay (always shown; semi-transparent when camera is on)
         cx = (tx0 + tx1) // 2
@@ -409,6 +438,47 @@ class JennyUI:
                 except Exception:
                     pass
 
+        # "Analyzing..." overlay
+        if self._analyzing:
+            pulse_alpha = int(180 + 60 * abs((self._pulse % 24) / 12.0 - 1.0))
+            ov2 = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            od2 = ImageDraw.Draw(ov2)
+            lbl = "Analyzing image..."
+            try:
+                bbox = self._f_name.getbbox(lbl)
+                lw2 = bbox[2] - bbox[0]
+            except Exception:
+                lw2 = len(lbl) * 10
+            lx = (tx0 + tx1) // 2 - lw2 // 2
+            ly2 = (ty0 + ty1) // 2 + 60
+            od2.text((lx, ly2), lbl, font=self._f_name,
+                     fill=_CYAN + (pulse_alpha,))
+            scene = Image.alpha_composite(scene.convert("RGBA"), ov2).convert("RGB")
+            draw = ImageDraw.Draw(scene)
+
+        # Drop zone hint (shown when no image and not analyzing)
+        elif self._drop_image is None and not cam_active:
+            dz_pad = 40
+            dz = [tx0 + dz_pad, ty0 + dz_pad, tx1 - dz_pad, ty1 - dz_pad - 30]
+            # dashed border approximation
+            for i in range(0, int(dz[2]-dz[0]), 14):
+                x = dz[0] + i
+                draw.line([x, dz[1], min(x+7, dz[2]), dz[1]], fill=_DIM, width=1)
+                draw.line([x, dz[3], min(x+7, dz[2]), dz[3]], fill=_DIM, width=1)
+            for i in range(0, int(dz[3]-dz[1]), 14):
+                y = dz[1] + i
+                draw.line([dz[0], y, dz[0], min(y+7, dz[3])], fill=_DIM, width=1)
+                draw.line([dz[2], y, dz[2], min(y+7, dz[3])], fill=_DIM, width=1)
+            try:
+                draw.text(((tx0+tx1)//2, (ty0+ty1)//2 - 10),
+                           "Drop an image here", font=self._f_name,
+                           fill=_DIM, anchor="mm")
+                draw.text(((tx0+tx1)//2, (ty0+ty1)//2 + 18),
+                           "or click the photo button below", font=self._f_sub,
+                           fill=_DIM, anchor="mm")
+            except Exception:
+                pass
+
         # Name label — bottom-left of tile
         nx, ny = tx0 + 20, ty1 - 34
         try:
@@ -430,10 +500,12 @@ class JennyUI:
         except Exception:
             pass
 
-    def set_listening(self, v): self._listening = v
-    def set_mode(self, m):      self._mode = m
-    def set_gesture(self, g):   self._gesture = g
-    def set_detections(self, d): self._dets = d
+    def set_listening(self, v):   self._listening = v
+    def set_mode(self, m):        self._mode = m
+    def set_gesture(self, g):     self._gesture = g
+    def set_detections(self, d):  self._dets = d
+    def set_analyzing(self, v):   self._analyzing = v
+    def set_drop_image(self, img): self._drop_image = img  # pass PIL Image or None
 
     def add_turn(self, role, text):
         self._convo.append((role, text))
@@ -466,6 +538,19 @@ class JennyUI:
         self._b_cam.icon = "cam_off" if not self._cam_on else "cam"
         self._b_cam._prerender()
         self._b_cam._show()
+
+    def _on_file_drop(self, event):
+        path = event.data.strip().strip("{}")
+        if self.on_image_drop:
+            self.on_image_drop(path)
+
+    def _open_file_dialog(self):
+        path = filedialog.askopenfilename(
+            title="Select an image",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff"), ("All files", "*.*")]
+        )
+        if path and self.on_image_drop:
+            self.on_image_drop(path)
 
     def _quit(self):
         self._running = False
