@@ -1,7 +1,8 @@
 """
 Jenny - Vision Module (YOLOv8 upgrade)
 =======================================
-Detects vehicles with:
+Detects all 80 COCO classes with YOLOv8.
+Vehicles get extra detail:
   • Type  — Sports Car, Sedan, SUV, Minivan, Truck, Pickup, Bus, Motorcycle
   • Color — Red, Blue, Green, Yellow, Orange, White, Black, Silver, Gray, Purple, Pink, Cyan
   • Shape inference — from bounding-box aspect ratio + YOLO class
@@ -33,8 +34,6 @@ _MODEL_DIR = os.path.join(os.path.dirname(__file__), "..")
 
 # ── COCO class IDs we care about ──────────────────────────────────── #
 _VEHICLES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
-_OTHERS   = {0: "person", 1: "bicycle", 14: "bird",
-             15: "cat",   16: "dog",    39: "bottle"}
 
 # ── Box-draw colors per detected color name (BGR) ─────────────────── #
 _BOX_COLORS = {
@@ -151,17 +150,13 @@ class VisionModule:
             cls_id = int(box.cls[0])
             conf   = float(box.conf[0])
 
-            is_vehicle = cls_id in _VEHICLES
-            is_other   = cls_id in _OTHERS
-            if not is_vehicle and not is_other:
-                continue
-
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             x1, y1 = max(0, x1), max(0, y1)
             x2 = min(frame.shape[1]-1, x2)
             y2 = min(frame.shape[0]-1, y2)
 
-            cls_name = _VEHICLES.get(cls_id) or _OTHERS.get(cls_id, "object")
+            cls_name = results.names[cls_id]
+            is_vehicle = cls_id in _VEHICLES
 
             if is_vehicle:
                 v_type = self._vehicle_type(cls_name, x1, y1, x2, y2)
